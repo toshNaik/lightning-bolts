@@ -80,9 +80,9 @@ class SimCLR(LightningModule):
         maxpool1: bool = True,
         optimizer: str = "adam",
         exclude_bn_bias: bool = False,
-        start_lr: float = 0.0,
+        start_lr: float = 1e-3,
         learning_rate: float = 1e-3,
-        final_lr: float = 0.0,
+        final_lr: float = 1e-3,
         weight_decay: float = 1e-6,
         **kwargs
     ):
@@ -142,12 +142,13 @@ class SimCLR(LightningModule):
         return self.encoder(x)[-1]
 
     def shared_step(self, batch):
-        if self.dataset == "stl10":
-            unlabeled_batch = batch[0]
-            batch = unlabeled_batch
+        # if self.dataset == "stl10":
+        #     unlabeled_batch = batch[0]
+        #     batch = unlabeled_batch
 
         # final image in tuple is for online eval
-        (img1, img2, _), y = batch
+        # (img1, img2, _), y = batch
+        img1, img2 = batch
 
         # get h representations, bolts resnet returns a list
         h1 = self(img1)
@@ -163,15 +164,23 @@ class SimCLR(LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss = self.shared_step(batch)
-
         self.log("train_loss", loss, on_step=True, on_epoch=False)
+        self.logger.experiment.add_scalar('Loss_per_step/Train', loss, self.global_step)
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss = self.shared_step(batch)
-
         self.log("val_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         return loss
+    
+    def training_epoch_end(self, training_steps_outputs):
+        avg_loss = torch.stack([x['loss'] for x in training_steps_outputs]).mean()
+        self.logger.experiment.add_scalar('Loss_per_epoch/Train', avg_loss, self.current_epoch)
+
+    def validation_epoch_end(self, validation_steps_outputs):
+        print(validation_steps_outputs)
+        avg_loss = torch.stack([x for x in validation_steps_outputs]).mean()
+        self.logger.experiment.add_scalar('Loss_per_epoch/Val', avg_loss, self.current_epoch)
 
     def exclude_from_wt_decay(self, named_params, weight_decay, skip_list=("bias", "bn")):
         params = []
@@ -216,12 +225,12 @@ class SimCLR(LightningModule):
         scheduler = {
             "scheduler": torch.optim.lr_scheduler.LambdaLR(
                 optimizer,
-                linear_warmup_decay(warmup_steps, total_steps, cosine=True),
+                # linear_warmup_decay(warmup_steps, total_steps, cosine=True),
+                lambda x: 0.1,
             ),
             "interval": "step",
             "frequency": 1,
         }
-
         return [optimizer], [scheduler]
 
     def nt_xent_loss(self, out_1, out_2, temperature, eps=1e-6):
@@ -304,125 +313,125 @@ class SimCLR(LightningModule):
         return parser
 
 
-@under_review()
-def cli_main():
-    from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
-    from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
-    from pl_bolts.models.self_supervised.simclr.transforms import SimCLREvalDataTransform, SimCLRTrainDataTransform
+# @under_review()
+# def cli_main():
+#     from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
+#     from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
+#     from pl_bolts.models.self_supervised.simclr.transforms import SimCLREvalDataTransform, SimCLRTrainDataTransform
 
-    parser = ArgumentParser()
+#     parser = ArgumentParser()
 
-    # model args
-    parser = SimCLR.add_model_specific_args(parser)
-    args = parser.parse_args()
+#     # model args
+#     parser = SimCLR.add_model_specific_args(parser)
+#     args = parser.parse_args()
 
-    if args.dataset == "stl10":
-        dm = STL10DataModule(data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers)
+#     if args.dataset == "stl10":
+#         dm = STL10DataModule(data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers)
 
-        dm.train_dataloader = dm.train_dataloader_mixed
-        dm.val_dataloader = dm.val_dataloader_mixed
-        args.num_samples = dm.num_unlabeled_samples
+#         dm.train_dataloader = dm.train_dataloader_mixed
+#         dm.val_dataloader = dm.val_dataloader_mixed
+#         args.num_samples = dm.num_unlabeled_samples
 
-        args.maxpool1 = False
-        args.first_conv = True
-        args.input_height = dm.dims[-1]
+#         args.maxpool1 = False
+#         args.first_conv = True
+#         args.input_height = dm.dims[-1]
 
-        normalization = stl10_normalization()
+#         normalization = stl10_normalization()
 
-        args.gaussian_blur = True
-        args.jitter_strength = 1.0
-    elif args.dataset == "cifar10":
-        val_split = 5000
-        if args.num_nodes * args.gpus * args.batch_size > val_split:
-            val_split = args.num_nodes * args.gpus * args.batch_size
+#         args.gaussian_blur = True
+#         args.jitter_strength = 1.0
+#     elif args.dataset == "cifar10":
+#         val_split = 5000
+#         if args.num_nodes * args.gpus * args.batch_size > val_split:
+#             val_split = args.num_nodes * args.gpus * args.batch_size
 
-        dm = CIFAR10DataModule(
-            data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers, val_split=val_split
-        )
+#         dm = CIFAR10DataModule(
+#             data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers, val_split=val_split
+#         )
 
-        args.num_samples = dm.num_samples
+#         args.num_samples = dm.num_samples
 
-        args.maxpool1 = False
-        args.first_conv = False
-        args.input_height = dm.dims[-1]
-        args.temperature = 0.5
+#         args.maxpool1 = False
+#         args.first_conv = False
+#         args.input_height = dm.dims[-1]
+#         args.temperature = 0.5
 
-        normalization = cifar10_normalization()
+#         normalization = cifar10_normalization()
 
-        args.gaussian_blur = False
-        args.jitter_strength = 0.5
-    elif args.dataset == "imagenet":
-        args.maxpool1 = True
-        args.first_conv = True
-        normalization = imagenet_normalization()
+#         args.gaussian_blur = False
+#         args.jitter_strength = 0.5
+#     elif args.dataset == "imagenet":
+#         args.maxpool1 = True
+#         args.first_conv = True
+#         normalization = imagenet_normalization()
 
-        args.gaussian_blur = True
-        args.jitter_strength = 1.0
+#         args.gaussian_blur = True
+#         args.jitter_strength = 1.0
 
-        args.batch_size = 64
-        args.num_nodes = 8
-        args.gpus = 8  # per-node
-        args.max_epochs = 800
+#         args.batch_size = 64
+#         args.num_nodes = 8
+#         args.gpus = 8  # per-node
+#         args.max_epochs = 800
 
-        args.optimizer = "lars"
-        args.learning_rate = 4.8
-        args.final_lr = 0.0048
-        args.start_lr = 0.3
-        args.online_ft = True
+#         args.optimizer = "lars"
+#         args.learning_rate = 4.8
+#         args.final_lr = 0.0048
+#         args.start_lr = 0.3
+#         args.online_ft = True
 
-        dm = ImagenetDataModule(data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers)
+#         dm = ImagenetDataModule(data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers)
 
-        args.num_samples = dm.num_samples
-        args.input_height = dm.dims[-1]
-    else:
-        raise NotImplementedError("other datasets have not been implemented till now")
+#         args.num_samples = dm.num_samples
+#         args.input_height = dm.dims[-1]
+#     else:
+#         raise NotImplementedError("other datasets have not been implemented till now")
 
-    dm.train_transforms = SimCLRTrainDataTransform(
-        input_height=args.input_height,
-        gaussian_blur=args.gaussian_blur,
-        jitter_strength=args.jitter_strength,
-        normalize=normalization,
-    )
+#     dm.train_transforms = SimCLRTrainDataTransform(
+#         input_height=args.input_height,
+#         gaussian_blur=args.gaussian_blur,
+#         jitter_strength=args.jitter_strength,
+#         normalize=normalization,
+#     )
 
-    dm.val_transforms = SimCLREvalDataTransform(
-        input_height=args.input_height,
-        gaussian_blur=args.gaussian_blur,
-        jitter_strength=args.jitter_strength,
-        normalize=normalization,
-    )
+#     dm.val_transforms = SimCLREvalDataTransform(
+#         input_height=args.input_height,
+#         gaussian_blur=args.gaussian_blur,
+#         jitter_strength=args.jitter_strength,
+#         normalize=normalization,
+#     )
 
-    model = SimCLR(**args.__dict__)
+#     model = SimCLR(**args.__dict__)
 
-    online_evaluator = None
-    if args.online_ft:
-        # online eval
-        online_evaluator = SSLOnlineEvaluator(
-            drop_p=0.0,
-            hidden_dim=None,
-            z_dim=args.hidden_mlp,
-            num_classes=dm.num_classes,
-            dataset=args.dataset,
-        )
+#     online_evaluator = None
+#     if args.online_ft:
+#         # online eval
+#         online_evaluator = SSLOnlineEvaluator(
+#             drop_p=0.0,
+#             hidden_dim=None,
+#             z_dim=args.hidden_mlp,
+#             num_classes=dm.num_classes,
+#             dataset=args.dataset,
+#         )
 
-    lr_monitor = LearningRateMonitor(logging_interval="step")
-    model_checkpoint = ModelCheckpoint(save_last=True, save_top_k=1, monitor="val_loss")
-    callbacks = [model_checkpoint, online_evaluator] if args.online_ft else [model_checkpoint]
-    callbacks.append(lr_monitor)
+#     lr_monitor = LearningRateMonitor(logging_interval="step")
+#     model_checkpoint = ModelCheckpoint(save_last=True, save_top_k=1, monitor="val_loss")
+#     callbacks = [model_checkpoint, online_evaluator] if args.online_ft else [model_checkpoint]
+#     callbacks.append(lr_monitor)
 
-    trainer = Trainer(
-        max_epochs=args.max_epochs,
-        max_steps=None if args.max_steps == -1 else args.max_steps,
-        gpus=args.gpus,
-        num_nodes=args.num_nodes,
-        accelerator="ddp" if args.gpus > 1 else None,
-        sync_batchnorm=True if args.gpus > 1 else False,
-        precision=32 if args.fp32 else 16,
-        callbacks=callbacks,
-        fast_dev_run=args.fast_dev_run,
-    )
+#     trainer = Trainer(
+#         max_epochs=args.max_epochs,
+#         max_steps=None if args.max_steps == -1 else args.max_steps,
+#         gpus=args.gpus,
+#         num_nodes=args.num_nodes,
+#         accelerator="ddp" if args.gpus > 1 else None,
+#         sync_batchnorm=True if args.gpus > 1 else False,
+#         precision=32 if args.fp32 else 16,
+#         callbacks=callbacks,
+#         fast_dev_run=args.fast_dev_run,
+#     )
 
-    trainer.fit(model, datamodule=dm)
+#     trainer.fit(model, datamodule=dm)
 
 
-if __name__ == "__main__":
-    cli_main()
+# if __name__ == "__main__":
+#     cli_main()
