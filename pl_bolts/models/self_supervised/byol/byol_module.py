@@ -96,18 +96,33 @@ class BYOL(LightningModule):
         """
         return self.online_network.encode(x)
 
+    def training_epoch_end(self, training_steps_outputs):
+        avg_loss = torch.stack([x['loss'] for x in training_steps_outputs]).mean()
+        self.logger.experiment.add_scalar('Loss_per_epoch/Train', avg_loss, self.current_epoch)
+
+    def validation_epoch_end(self, validation_steps_outputs):
+        print(validation_steps_outputs)
+        avg_loss = torch.stack([x for x in validation_steps_outputs]).mean()
+        self.logger.experiment.add_scalar('Loss_per_epoch/Val', avg_loss, self.current_epoch)
+
     def training_step(self, batch: Any, batch_idx: int) -> Tensor:
         """Complete training loop."""
-        return self._shared_step(batch, batch_idx, "train")
+        loss =  self._shared_step(batch, batch_idx, "train")
+        self.log("train_loss", loss, on_step=True, on_epoch=False)
+        self.logger.experiment.add_scalar('Loss_per_step/Train', loss, self.global_step)
+        return loss
 
     def validation_step(self, batch: Any, batch_idx: int) -> Tensor:
         """Complete validation loop."""
-        return self._shared_step(batch, batch_idx, "val")
+        loss = self._shared_step(batch, batch_idx, "val")
+        self.log("val_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        return loss
 
     def _shared_step(self, batch: Any, batch_idx: int, step: str) -> Tensor:
         """Shared evaluation step for training and validation loop."""
-        imgs, _ = batch
-        img1, img2 = imgs[:2]
+        # imgs, _ = batch
+        # img1, img2 = imgs[:2]
+        img1, img2 = batch
 
         # Calculate similarity loss in each direction
         loss_12 = self.calculate_loss(img1, img2)
@@ -137,14 +152,23 @@ class BYOL(LightningModule):
         h1 = self.predictor(z1)
         with torch.no_grad():
             _, z2 = self.target_network(v_target)
-        loss = -2 * F.cosine_similarity(h1, z2).mean()
+        loss = 2 - 2 * F.cosine_similarity(h1, z2).mean()
         return loss
 
     def configure_optimizers(self):
         optimizer = Adam(self.parameters(), lr=self.hparams.learning_rate, weight_decay=self.hparams.weight_decay)
-        scheduler = LinearWarmupCosineAnnealingLR(
-            optimizer, warmup_epochs=self.hparams.warmup_epochs, max_epochs=self.hparams.max_epochs
-        )
+        # scheduler = LinearWarmupCosineAnnealingLR(
+        #     optimizer, warmup_epochs=self.hparams.warmup_epochs, max_epochs=self.hparams.max_epochs
+        # )
+        scheduler = {
+            "scheduler": torch.optim.lr_scheduler.LambdaLR(
+                optimizer,
+                # linear_warmup_decay(warmup_steps, total_steps, cosine=True),
+                lambda x: 0.1,
+            ),
+            "interval": "step",
+            "frequency": 1,
+        }
         return [optimizer], [scheduler]
 
     @staticmethod
